@@ -1,8 +1,13 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from pandas import read_csv
+
+from sklearn import model_selection
+from sklearn.tree import DecisionTreeClassifier
 
 import copy
 import itertools
+import random
 from typing import List, Tuple, Dict
 
 # Set random seed
@@ -10,26 +15,30 @@ np.random.seed(2022)
 
 
 # Fitness function
-def tsp_fitness_func(chromosome: np.array, map: np.array) -> float:
+def zoo_fitness_func(chromosome: np.array, data) -> float:
     """
     Fitness: An evaluator of each chromosome.
     The fitness function return a fitness score to each chromosome.
     """
 
-    # Check for validation
-    assert len(chromosome) == len(map), 'Wrong Matrix!'
-    city_num = len(map)
-    # All city must be visited.
-    # Can not visit one city twice.
-    if set(chromosome) != set(i for i in range(city_num)):
-        return 0
+    # Separate to input features and resulting category (last column):
+    data_x = data.iloc[:, 0:16]
+    data_y = data.iloc[:, 16]
 
-    # Calculate ordered distance
-    distance = 0
-    for i in range(city_num - 1):
-        distance += map[chromosome[i]][chromosome[i + 1]]
+    # Split the data, creating a group of training/validation sets to be used in the k-fold validation process:
+    kfold = model_selection.KFold(n_splits=5)
 
-    return distance
+    classifier = DecisionTreeClassifier(random_state=46)
+
+    # Drop the dataset columns that correspond to the unselected features:
+    zero_indices = [i for i, n in enumerate(chromosome) if n == 0]
+    current_x = data_x.drop(data_x.columns[zero_indices], axis=1)
+
+    # perform k-fold validation and determine the accuracy measure of the classifier:
+    cv_results = model_selection.cross_val_score(classifier, current_x, data_y, cv=kfold, scoring='accuracy')
+
+    # return mean accuracy:
+    return cv_results.mean()
 
 
 def roulette_wheel_prob(population: np.array, beta: float) -> np.array:
@@ -85,7 +94,7 @@ def one_point_crossover(parent1: np.array, parent2: np.array) -> Tuple:
 
 
 # Mutation
-def swap_mutation(chromosome: np.array, mu: float, gene_num: int) -> np.array:
+def binary_mutation(chromosome: np.array, mu: float) -> np.array:
     """
     The genes in a new formed offspring subject to a mutation with a low probability.
     Mutation maintains diversity within a population preventing the population from early convergence.
@@ -93,25 +102,40 @@ def swap_mutation(chromosome: np.array, mu: float, gene_num: int) -> np.array:
     Args:
         chromosome: Child chromosome.
         mu: Mutation rate. % of gene to be modified.
-        gene_num: number of cities.
     """
     y = copy.deepcopy(chromosome)
-
     flag = np.random.rand(*chromosome['gene'].shape) <= mu
-    ind = np.argwhere(flag)[:, 0]
+    ind = np.argwhere(flag)
 
-    while len(ind) % 2 != 0:
-        temp = np.random.randint(gene_num)
-        if temp not in ind:
-            ind = np.append(ind, temp)
-
-    swap_dict = np.random.choice(len(ind), len(ind), replace=False).reshape(-1, 2)
-    for i in swap_dict:
-        temp = y['gene'][ind[i[0]]]
-        y['gene'][ind[i[0]]] = y['gene'][ind[i[1]]]
-        y['gene'][ind[i[1]]] = temp
+    for i in ind[:, 0]:
+        if y['gene'][i] == 1:
+            y['gene'][i] = 0
+        else:
+            y['gene'][i] = 1
 
     return y
+
+
+def uniform_mutation(chromosome: np.array, mu: float, sigma: float) -> np.array:
+    """
+    Args:
+        chromosome: child chromosome.
+        mu: mutation rate. % of gene to be modified
+        sigma: step size of mutation
+    """
+
+    y = copy.deepcopy(chromosome)
+    flag = np.random.rand(*chromosome['gene'].shape) <= mu
+    ind = np.argwhere(flag)
+
+    y['position'][ind] = y['position'][ind] + sigma * np.random.randn(*ind.shape)
+    y['position'][ind] = [0 for _ in range(len(ind))] if y['position'][ind] == 1 else 0
+
+    return y
+
+
+def swap_mutation(chromosome: np.array, mu: float) -> np.array:
+    pass
 
 
 def sort_chromosome(population: np.array, population_size: int) -> np.array:
@@ -131,7 +155,9 @@ def sort_chromosome(population: np.array, population_size: int) -> np.array:
 
 
 # Initial population
-def binary_initialization(population_size: int, gene_num: int, map: np.array) -> Dict:
+def zoo_initialization(population_size: int,
+                       gene_num: int,
+                       data) -> Dict:
     """
     Gene: an element of the problem.
     Individual (chromosome): a solution that satisfies restrictions.
@@ -146,33 +172,23 @@ def binary_initialization(population_size: int, gene_num: int, map: np.array) ->
     # First generation
     for i in range(population_size):
         # Randomly initialize chromosomes
-        population[i]['gene'] = np.random.randint(gene_num + 1, size=gene_num)
-        population[i]['gene'] = np.random.choice(gene_num, gene_num, replace=False)
+        population[i]['gene'] = np.random.randint(2, size=gene_num)
 
         # Calculate fitness scores
-        population[i]['score'] = tsp_fitness_func(population[i]['gene'], map)
+        population[i]['score'] = zoo_fitness_func(population[i]['gene'], data)
 
     return population
 
 
-def tsp_evaluation(population_size: int,
+def zoo_evaluation(population_size: int,
                    gene_num: int,
                    epoch: int,
                    beta: float,
                    mu: float,
-                   map: np.array):
-    population = binary_initialization(population_size,
-                                       gene_num,
-                                       map)
-
-    # Define best chromosome in the first generation
-    # best_score = np.inf
-    # best_chromosome = None
-    #
-    # for i in range(population_size):
-    #     if population[i]['score'] < best_score:
-    #         best_chromosome = copy.deepcopy(population[i])
-    #         best_score = population[i]['score']
+                   data):
+    population = zoo_initialization(population_size,
+                                    gene_num,
+                                    data)
 
     # Find best chromosome during iteration
     best_score_list = []
@@ -191,11 +207,11 @@ def tsp_evaluation(population_size: int,
             c1, c2 = one_point_crossover(p1, p2)
 
             # Perform mutation
-            c1 = swap_mutation(c1, mu, gene_num)
-            c2 = swap_mutation(c2, mu, gene_num)
+            c1 = binary_mutation(c1, mu)
+            c2 = binary_mutation(c2, mu)
 
-            score_c1 = tsp_fitness_func(c1['gene'], map)
-            score_c2 = tsp_fitness_func(c2['gene'], map)
+            score_c1 = zoo_fitness_func(c1['gene'], data)
+            score_c2 = zoo_fitness_func(c2['gene'], data)
 
             c1['score'] = score_c1
             c2['score'] = score_c2
@@ -225,21 +241,19 @@ def tsp_evaluation(population_size: int,
 
 
 if __name__ == '__main__':
-    city_num = 10
-    map_random = np.random.randint(1, 100, size=(city_num, city_num))
-    map = ((map_random + map_random.T) / 2).astype(int)
+    DATASET_URL = 'https://archive.ics.uci.edu/ml/machine-learning-databases/zoo/zoo.data'
+    # Read the dataset, skipping the first columns (animal name):
+    data = read_csv(DATASET_URL, header=None, usecols=range(1, 18))
 
-    best_cost, best_solution = tsp_evaluation(population_size=30,
-                                              gene_num=city_num,
-                                              epoch=5001,
+    best_cost, best_solution = zoo_evaluation(population_size=30,
+                                              gene_num=16,
+                                              epoch=150,
                                               beta=1.0,
                                               mu=0.1,
-                                              map=map)
-
-    print(map)
+                                              data=data)
 
     plt.plot(best_cost)
-    plt.xlim(0, 5001)
+    plt.xlim(0, 150)
     plt.xlabel('Generations')
     plt.ylabel('Best Cost')
     plt.title('Genetic Algorithm')
